@@ -1,1 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.venv/
+venv/
+env/
 
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data
+data/raw/
+data/processed/
+data/splits/
+*.xlsx
+*.xls
+
+# Model checkpoints
+results/checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Participant-level outputs
+results/fold_results/
+results/predictions/
+results/shap_values/
+results/attention_weights/
+
+# Logs and temporary files
+logs/
+*.log
+*.tmp
