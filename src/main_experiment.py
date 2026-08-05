@@ -1,10 +1,15 @@
-"""Complete-input five-fold evaluation for all five manuscript models."""
+"""Exact complete-input experiment structure used for the manuscript.
 
-from __future__ import annotations
+RF/XGBoost:
+    outer stratified 5-fold only; train on 80%, test on 20%.
+
+MLP/FT/Robust FT:
+    outer stratified 5-fold; split 10% of each outer training portion
+    as validation for validation-AUROC early stopping.
+"""
 
 import argparse
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import torch
@@ -12,225 +17,231 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from xgboost import XGBClassifier
 
-try:
-    from .config import (
-        CONTINUOUS_FEATURES,
-        FT_CONFIG,
-        MLP_CONFIG,
-        N_SPLITS,
-        RF_CONFIG,
-        ROBUST_FT_CONFIG,
-        SEED,
-        TASKS,
-        XGB_CONFIG,
-    )
-    from .data_utils import fit_preprocessor, load_data, make_task
-    from .models import FTTransformer, MLPClassifier, RobustFTTransformer
-    from .train_utils import (
-        binary_metrics,
-        predict_ft,
-        predict_mlp,
-        save_checkpoint,
-        set_seed,
-        summarize_fold_results,
-        train_torch_model,
-    )
-except ImportError:
-    from config import (
-        CONTINUOUS_FEATURES,
-        FT_CONFIG,
-        MLP_CONFIG,
-        N_SPLITS,
-        RF_CONFIG,
-        ROBUST_FT_CONFIG,
-        SEED,
-        TASKS,
-        XGB_CONFIG,
-    )
-    from data_utils import fit_preprocessor, load_data, make_task
-    from models import FTTransformer, MLPClassifier, RobustFTTransformer
-    from train_utils import (
-        binary_metrics,
-        predict_ft,
-        predict_mlp,
-        save_checkpoint,
-        set_seed,
-        summarize_fold_results,
-        train_torch_model,
-    )
+from .config import *
+from .data_utils import (
+    fit_neural_preprocessor, fit_tree_preprocessor,
+    load_dataframe, make_task_dataframe
+)
+from .models import MLPClassifier, FTTransformer, RobustFTTransformer
+from .train_utils import (
+    compute_binary_metrics, predict_ft, predict_mlp,
+    set_seed, train_neural_model
+)
 
 
 def run(args):
-    set_seed(args.seed)
+    set_seed(SEED)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
-    output_dir = Path(args.output_dir)
-    checkpoint_dir = output_dir / "checkpoints"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir = out_dir / "checkpoints"
+    checkpoint_dir.mkdir(exist_ok=True)
 
-    df = load_data(args.data_path)
-    fold_rows = []
-
-    rf_config = dict(RF_CONFIG)
-    xgb_config = dict(XGB_CONFIG)
-    mlp_config = dict(MLP_CONFIG)
-    ft_config = dict(FT_CONFIG)
-    robust_config = dict(ROBUST_FT_CONFIG)
-
-    if args.quick:
-        rf_config["n_estimators"] = 20
-        xgb_config["n_estimators"] = 30
-        mlp_config.update(epochs=3, patience=2)
-        ft_config.update(epochs=3, patience=2)
-        robust_config.update(epochs=3, patience=2)
+    df = load_dataframe(args.data_path)
+    all_rows = []
 
     for task_name in TASKS:
-        x, y = make_task(df, task_name)
-        splitter = StratifiedKFold(
-            n_splits=args.n_splits, shuffle=True, random_state=args.seed
+        X, y_series = make_task_dataframe(df, task_name)
+        y = y_series.to_numpy()
+        skf = StratifiedKFold(
+            n_splits=CV_N_SPLITS, shuffle=True, random_state=SEED
         )
 
-        for fold, (trainval_idx, test_idx) in enumerate(splitter.split(x, y), 1):
-            train_idx, val_idx = train_test_split(
-                trainval_idx,
-                test_size=0.10,
-                random_state=args.seed + fold,
-                stratify=y[trainval_idx],
+        for fold_idx, (trainval_idx, test_idx) in enumerate(skf.split(X, y), 1):
+            X_trainval = X.iloc[trainval_idx].copy()
+            X_test = X.iloc[test_idx].copy()
+            y_trainval = y[trainval_idx]
+            y_test = y[test_idx]
+
+            # RF and XGBoost: no inner validation split in the original scripts.
+            tree_prep = fit_tree_preprocessor(X_trainval)
+            X_tree_train = tree_prep.transform(X_trainval)
+            X_tree_test = tree_prep.transform(X_test)
+
+            rf = RandomForestClassifier(
+                **RF_CONFIG, random_state=SEED + fold_idx, n_jobs=1
+            )
+            rf.fit(X_tree_train, y_trainval)
+            pred = rf.predict(X_tree_test)
+            prob = rf.predict_proba(X_tree_test)
+            all_rows.append({
+                "Task": task_name, "Fold": fold_idx, "Model": "Random Forest",
+                **compute_binary_metrics(y_test, pred, prob[:, 1])
+            })
+
+            xgb = XGBClassifier(
+                **XGB_CONFIG,
+                objective="binary:logistic",
+                eval_metric="logloss",
+                tree_method="hist",
+                random_state=SEED + fold_idx,
+                n_jobs=1,
+            )
+            xgb.fit(X_tree_train, y_trainval)
+            pred = xgb.predict(X_tree_test)
+            prob = xgb.predict_proba(X_tree_test)
+            all_rows.append({
+                "Task": task_name, "Fold": fold_idx, "Model": "XGBoost",
+                **compute_binary_metrics(y_test, pred, prob[:, 1])
+            })
+
+            # Neural models: 10% of the outer training fold is validation.
+            X_train, X_val, y_train, y_val = train_test_split(
+                X_trainval,
+                y_trainval,
+                test_size=INNER_VALIDATION_SIZE,
+                random_state=SEED + fold_idx,
+                stratify=y_trainval,
             )
 
-            preprocessor = fit_preprocessor(x.iloc[train_idx])
-            x_train_cont, x_train_cat, x_train_all = preprocessor.transform(x.iloc[train_idx])
-            x_val_cont, x_val_cat, x_val_all = preprocessor.transform(x.iloc[val_idx])
-            x_test_cont, x_test_cat, x_test_all = preprocessor.transform(x.iloc[test_idx])
-
-            y_train, y_val, y_test = y[train_idx], y[val_idx], y[test_idx]
-
-            classical = {
-                "Random_Forest": RandomForestClassifier(
-                    **rf_config,
-                    random_state=args.seed + fold,
-                    n_jobs=1,
-                ),
-                "XGBoost": XGBClassifier(
-                    **xgb_config,
-                    objective="binary:logistic",
-                    eval_metric="logloss",
-                    tree_method="hist",
-                    random_state=args.seed + fold,
-                    n_jobs=1,
-                ),
-            }
-            for model_name, model in classical.items():
-                model.fit(x_train_all, y_train)
-                pred = model.predict(x_test_all)
-                prob = model.predict_proba(x_test_all)[:, 1]
-                fold_rows.append(
-                    {"Task": task_name, "Fold": fold, "Model": model_name, **binary_metrics(y_test, pred, prob)}
-                )
+            # MLP used train-fold mode for missing categorical values.
+            mlp_prep = fit_neural_preprocessor(X_train, categorical_strategy="mode")
+            _, _, X_mlp_train = mlp_prep.transform(X_train)
+            _, _, X_mlp_val = mlp_prep.transform(X_val)
+            _, _, X_mlp_test = mlp_prep.transform(X_test)
 
             mlp = MLPClassifier(
-                input_dim=x_train_all.shape[1],
-                hidden_dim=mlp_config["hidden_dim"],
-                num_layers=mlp_config["num_layers"],
-                dropout=mlp_config["dropout"],
+                input_dim=X_mlp_train.shape[1],
+                hidden_dim=MLP_CONFIG["hidden_dim"],
+                num_layers=MLP_CONFIG["num_layers"],
+                dropout=MLP_CONFIG["dropout"],
             )
-            mlp = train_torch_model(
+            mlp, best_epoch, best_auc, best_loss = train_neural_model(
                 mlp,
                 (
-                    torch.tensor(x_train_all, dtype=torch.float32),
+                    torch.tensor(X_mlp_train, dtype=torch.float32),
                     torch.tensor(y_train, dtype=torch.long),
                 ),
                 (
-                    torch.tensor(x_val_all, dtype=torch.float32),
+                    torch.tensor(X_mlp_val, dtype=torch.float32),
                     torch.tensor(y_val, dtype=torch.long),
                 ),
-                batch_size=mlp_config["batch_size"],
-                epochs=mlp_config["epochs"],
-                patience=mlp_config["patience"],
-                learning_rate=mlp_config["learning_rate"],
-                weight_decay=mlp_config["weight_decay"],
-                device=device,
+                MLP_CONFIG, device, "mlp"
             )
             pred, prob = predict_mlp(
-                mlp, x_test_all, mlp_config["batch_size"], device
+                mlp, X_mlp_test, MLP_CONFIG["batch_size"], device
             )
-            fold_rows.append(
-                {"Task": task_name, "Fold": fold, "Model": "MLP", **binary_metrics(y_test, pred, prob)}
-            )
+            all_rows.append({
+                "Task": task_name, "Fold": fold_idx, "Model": "MLP",
+                "Best_Epoch": best_epoch, "Best_Val_AUROC": best_auc,
+                "Best_Val_Loss": best_loss,
+                **compute_binary_metrics(y_test, pred, prob[:, 1])
+            })
 
-            for model_name, model_class, config, robust in [
-                ("FT_Transformer", FTTransformer, ft_config, False),
-                ("Robust_FT_Transformer", RobustFTTransformer, robust_config, True),
+            # FT and Robust FT used literal "Missing" for missing categorical values.
+            ft_prep = fit_neural_preprocessor(X_train, categorical_strategy="missing")
+            Xc_train, Xk_train, _ = ft_prep.transform(X_train)
+            Xc_val, Xk_val, _ = ft_prep.transform(X_val)
+            Xc_test, Xk_test, _ = ft_prep.transform(X_test)
+
+            for model_name, model_type, model in [
+                (
+                    "FT-Transformer",
+                    "ft",
+                    FTTransformer(
+                        len(CONTINUOUS_FEATURES),
+                        ft_prep.cat_cardinalities,
+                        d_model=FT_CONFIG["d_model"],
+                        n_heads=FT_CONFIG["n_heads"],
+                        n_layers=FT_CONFIG["n_layers"],
+                        dropout=FT_CONFIG["dropout"],
+                    ),
+                ),
+                (
+                    "Robust FT-Transformer",
+                    "robust_ft",
+                    RobustFTTransformer(
+                        len(CONTINUOUS_FEATURES),
+                        ft_prep.cat_cardinalities,
+                        d_model=FT_CONFIG["d_model"],
+                        n_heads=FT_CONFIG["n_heads"],
+                        n_layers=FT_CONFIG["n_layers"],
+                        dropout=FT_CONFIG["dropout"],
+                        feature_mask_prob=MAIN_ROBUST_MASK_PROBABILITY,
+                    ),
+                ),
             ]:
-                kwargs = dict(
-                    num_cont_features=len(CONTINUOUS_FEATURES),
-                    cat_cardinalities=preprocessor.cat_cardinalities,
-                    d_model=config["d_model"],
-                    n_heads=config["n_heads"],
-                    n_layers=config["n_layers"],
-                    dropout=config["dropout"],
-                )
-                if robust:
-                    kwargs["feature_mask_prob"] = config["feature_mask_prob"]
-                model = model_class(**kwargs)
-                model = train_torch_model(
+                model, best_epoch, best_auc, best_loss = train_neural_model(
                     model,
                     (
-                        torch.tensor(x_train_cont, dtype=torch.float32),
-                        torch.tensor(x_train_cat, dtype=torch.long),
+                        torch.tensor(Xc_train, dtype=torch.float32),
+                        torch.tensor(Xk_train, dtype=torch.long),
                         torch.tensor(y_train, dtype=torch.long),
                     ),
                     (
-                        torch.tensor(x_val_cont, dtype=torch.float32),
-                        torch.tensor(x_val_cat, dtype=torch.long),
+                        torch.tensor(Xc_val, dtype=torch.float32),
+                        torch.tensor(Xk_val, dtype=torch.long),
                         torch.tensor(y_val, dtype=torch.long),
                     ),
-                    batch_size=config["batch_size"],
-                    epochs=config["epochs"],
-                    patience=config["patience"],
-                    learning_rate=config["learning_rate"],
-                    weight_decay=config["weight_decay"],
-                    device=device,
-                    robust=robust,
+                    FT_CONFIG, device, model_type
                 )
                 pred, prob = predict_ft(
-                    model, x_test_cont, x_test_cat, config["batch_size"], device
+                    model, Xc_test, Xk_test, FT_CONFIG["batch_size"], device
                 )
-                fold_rows.append(
-                    {"Task": task_name, "Fold": fold, "Model": model_name, **binary_metrics(y_test, pred, prob)}
-                )
+                all_rows.append({
+                    "Task": task_name, "Fold": fold_idx, "Model": model_name,
+                    "Best_Epoch": best_epoch, "Best_Val_AUROC": best_auc,
+                    "Best_Val_Loss": best_loss,
+                    **compute_binary_metrics(y_test, pred, prob[:, 1])
+                })
 
-                save_checkpoint(
-                    checkpoint_dir / f"{model_name}_{task_name}_fold{fold}.pt",
-                    {
-                        "model_state_dict": model.state_dict(),
-                        "model_name": model_name,
-                        "task": task_name,
-                        "fold": fold,
-                        "config": config,
-                        "preprocessor": preprocessor,
-                        "cat_cardinalities": preprocessor.cat_cardinalities,
-                        "train_idx": train_idx,
-                        "val_idx": val_idx,
-                        "test_idx": test_idx,
-                    },
-                )
+                torch.save({
+                    "model_name": model_name,
+                    "task_name": task_name,
+                    "fold_idx": fold_idx,
+                    "cv_n_splits": CV_N_SPLITS,
+                    "seed": SEED,
+                    "model_state_dict": model.state_dict(),
+                    "best_config": FT_CONFIG,
+                    "feature_mask_prob": (
+                        MAIN_ROBUST_MASK_PROBABILITY
+                        if model_type == "robust_ft" else 0.0
+                    ),
+                    "num_cont_features": len(CONTINUOUS_FEATURES),
+                    "cat_cardinalities": ft_prep.cat_cardinalities,
+                    "num_classes": 2,
+                    "continuous_cols": CONTINUOUS_FEATURES,
+                    "categorical_cols": CATEGORICAL_FEATURES,
+                    "feature_names": FEATURES,
+                    "label_col": LABEL_COLUMN,
+                    "selected_classes": TASKS[task_name]["selected_classes"],
+                    "label_map": TASKS[task_name]["label_map"],
+                    "target_names": TASKS[task_name]["target_names"],
+                    "scaler": ft_prep.scaler,
+                    "encoder": ft_prep.encoder,
+                    "continuous_fill_values": ft_prep.continuous_fill_values,
+                    "categorical_fill_values": ft_prep.categorical_fill_values,
+                    "trainval_idx": trainval_idx,
+                    "test_idx": test_idx,
+                    "train_index": X_train.index.to_numpy(),
+                    "val_index": X_val.index.to_numpy(),
+                    "test_index": X_test.index.to_numpy(),
+                    "best_epoch": best_epoch,
+                    "best_val_auc": best_auc,
+                    "best_val_loss": best_loss,
+                }, checkpoint_dir / f"{model_name.replace(' ', '_')}_{task_name}_fold{fold_idx}.pt")
 
-    fold_df = pd.DataFrame(fold_rows)
-    fold_df.to_csv(output_dir / "complete_input_fold_results.csv", index=False)
-    summary_df = summarize_fold_results(fold_df, ["Task", "Model"])
-    summary_df.to_csv(output_dir / "complete_input_summary.csv", index=False)
-    print(summary_df.to_string(index=False))
-    return summary_df
+    fold_df = pd.DataFrame(all_rows)
+    fold_df.to_csv(out_dir / "complete_input_fold_results.csv", index=False)
+
+    metrics = [
+        "Accuracy", "Precision_Macro", "Recall_Macro",
+        "Macro_F1", "Balanced_Accuracy", "AUROC"
+    ]
+    summary = fold_df.groupby(["Task", "Model"], as_index=False)[metrics].agg(["mean", "std"])
+    summary.columns = [
+        "_".join([str(v) for v in col if str(v)])
+        for col in summary.columns.to_flat_index()
+    ]
+    summary.to_csv(out_dir / "complete_input_summary.csv", index=False)
+    print(summary.to_string(index=False))
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", required=True)
-    parser.add_argument("--output_dir", default="results/run")
-    parser.add_argument("--n_splits", type=int, default=N_SPLITS)
-    parser.add_argument("--seed", type=int, default=SEED)
+    parser.add_argument("--output_dir", default="results/main_experiment")
     parser.add_argument("--cpu", action="store_true")
-    parser.add_argument("--quick", action="store_true")
     return parser.parse_args()
 
 

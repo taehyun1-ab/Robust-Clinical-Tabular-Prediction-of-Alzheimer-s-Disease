@@ -1,88 +1,106 @@
-"""Robust FT-Transformer masking-probability ablation."""
+"""Train Robust FT-Transformer with p=0.1, 0.2, and 0.3.
 
-from __future__ import annotations
+This keeps the original outer 5-fold split, inner 10% validation split,
+train-fold preprocessing, class-weighted cross-entropy, and
+validation-AUROC early stopping.
+"""
 
 import argparse
 from pathlib import Path
-
 import pandas as pd
 import torch
 from sklearn.model_selection import StratifiedKFold, train_test_split
 
-try:
-    from .config import CONTINUOUS_FEATURES, MASK_PROBABILITIES, N_SPLITS, ROBUST_FT_CONFIG, SEED, TASKS
-    from .data_utils import fit_preprocessor, load_data, make_task
-    from .models import RobustFTTransformer
-    from .train_utils import binary_metrics, predict_ft, set_seed, summarize_fold_results, train_torch_model
-except ImportError:
-    from config import CONTINUOUS_FEATURES, MASK_PROBABILITIES, N_SPLITS, ROBUST_FT_CONFIG, SEED, TASKS
-    from data_utils import fit_preprocessor, load_data, make_task
-    from models import RobustFTTransformer
-    from train_utils import binary_metrics, predict_ft, set_seed, summarize_fold_results, train_torch_model
+from .config import *
+from .data_utils import load_dataframe, make_task_dataframe, fit_neural_preprocessor
+from .models import RobustFTTransformer
+from .train_utils import compute_binary_metrics, predict_ft, set_seed, train_neural_model
 
 
 def run(args):
-    set_seed(args.seed)
+    set_seed(SEED)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    df = load_data(args.data_path)
-    base = dict(ROBUST_FT_CONFIG)
-    if args.quick:
-        base.update(epochs=3, patience=2)
-
+    df = load_dataframe(args.data_path)
     rows = []
-    for probability in args.probabilities:
+
+    for mask_prob in MASK_PROBABILITIES:
         for task_name in TASKS:
-            x, y = make_task(df, task_name)
-            cv = StratifiedKFold(args.n_splits, shuffle=True, random_state=args.seed)
-            for fold, (trainval_idx, test_idx) in enumerate(cv.split(x, y), 1):
-                train_idx, val_idx = train_test_split(
-                    trainval_idx, test_size=0.10, stratify=y[trainval_idx],
-                    random_state=args.seed + fold,
+            X, y_series = make_task_dataframe(df, task_name)
+            y = y_series.to_numpy()
+            skf = StratifiedKFold(CV_N_SPLITS, shuffle=True, random_state=SEED)
+
+            for fold_idx, (trainval_idx, test_idx) in enumerate(skf.split(X, y), 1):
+                X_trainval, X_test = X.iloc[trainval_idx].copy(), X.iloc[test_idx].copy()
+                y_trainval, y_test = y[trainval_idx], y[test_idx]
+                X_train, X_val, y_train, y_val = train_test_split(
+                    X_trainval, y_trainval,
+                    test_size=INNER_VALIDATION_SIZE,
+                    random_state=SEED + fold_idx,
+                    stratify=y_trainval,
                 )
-                prep = fit_preprocessor(x.iloc[train_idx])
-                trc, trk, _ = prep.transform(x.iloc[train_idx])
-                vac, vak, _ = prep.transform(x.iloc[val_idx])
-                tec, tek, _ = prep.transform(x.iloc[test_idx])
+                prep = fit_neural_preprocessor(X_train, "missing")
+                trc, trk, _ = prep.transform(X_train)
+                vac, vak, _ = prep.transform(X_val)
+                tec, tek, _ = prep.transform(X_test)
 
                 model = RobustFTTransformer(
-                    num_cont_features=len(CONTINUOUS_FEATURES),
-                    cat_cardinalities=prep.cat_cardinalities,
-                    d_model=base["d_model"],
-                    n_heads=base["n_heads"],
-                    n_layers=base["n_layers"],
-                    dropout=base["dropout"],
-                    feature_mask_prob=probability,
+                    len(CONTINUOUS_FEATURES), prep.cat_cardinalities,
+                    d_model=FT_CONFIG["d_model"],
+                    n_heads=FT_CONFIG["n_heads"],
+                    n_layers=FT_CONFIG["n_layers"],
+                    dropout=FT_CONFIG["dropout"],
+                    feature_mask_prob=mask_prob,
                 )
-                model = train_torch_model(
+                model, best_epoch, best_auc, best_loss = train_neural_model(
                     model,
-                    (torch.tensor(trc, dtype=torch.float32), torch.tensor(trk, dtype=torch.long), torch.tensor(y[train_idx], dtype=torch.long)),
-                    (torch.tensor(vac, dtype=torch.float32), torch.tensor(vak, dtype=torch.long), torch.tensor(y[val_idx], dtype=torch.long)),
-                    batch_size=base["batch_size"], epochs=base["epochs"], patience=base["patience"],
-                    learning_rate=base["learning_rate"], weight_decay=base["weight_decay"],
-                    device=device, robust=True,
+                    (
+                        torch.tensor(trc, dtype=torch.float32),
+                        torch.tensor(trk, dtype=torch.long),
+                        torch.tensor(y_train, dtype=torch.long),
+                    ),
+                    (
+                        torch.tensor(vac, dtype=torch.float32),
+                        torch.tensor(vak, dtype=torch.long),
+                        torch.tensor(y_val, dtype=torch.long),
+                    ),
+                    FT_CONFIG, device, "robust_ft"
                 )
-                pred, prob = predict_ft(model, tec, tek, base["batch_size"], device)
-                rows.append({"Mask_Probability": probability, "Task": task_name, "Fold": fold, **binary_metrics(y[test_idx], pred, prob)})
+                pred, prob = predict_ft(
+                    model, tec, tek, FT_CONFIG["batch_size"], device
+                )
+                rows.append({
+                    "Mask_Probability": mask_prob,
+                    "Task": task_name,
+                    "Fold": fold_idx,
+                    "Best_Epoch": best_epoch,
+                    "Best_Val_AUROC": best_auc,
+                    "Best_Val_Loss": best_loss,
+                    **compute_binary_metrics(y_test, pred, prob[:, 1]),
+                })
 
-    fold_df = pd.DataFrame(rows)
-    fold_df.to_csv(out / "masking_probability_fold_results.csv", index=False)
-    summary = summarize_fold_results(fold_df, ["Mask_Probability", "Task"])
+    result = pd.DataFrame(rows)
+    result.to_csv(out / "masking_probability_fold_results.csv", index=False)
+    summary = result.groupby(
+        ["Mask_Probability", "Task"], as_index=False
+    ).agg(
+        Accuracy_Mean=("Accuracy", "mean"),
+        Accuracy_SD=("Accuracy", "std"),
+        Macro_F1_Mean=("Macro_F1", "mean"),
+        Macro_F1_SD=("Macro_F1", "std"),
+        AUROC_Mean=("AUROC", "mean"),
+        AUROC_SD=("AUROC", "std"),
+    )
     summary.to_csv(out / "masking_probability_summary.csv", index=False)
     print(summary.to_string(index=False))
-    return summary
 
 
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--data_path", required=True)
     p.add_argument("--output_dir", default="results/masking_probability")
-    p.add_argument("--probabilities", type=float, nargs="+", default=list(MASK_PROBABILITIES))
-    p.add_argument("--n_splits", type=int, default=N_SPLITS)
-    p.add_argument("--seed", type=int, default=SEED)
     p.add_argument("--cpu", action="store_true")
-    p.add_argument("--quick", action="store_true")
     return p.parse_args()
 
 

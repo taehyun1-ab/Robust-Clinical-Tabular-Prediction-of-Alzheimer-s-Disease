@@ -1,11 +1,16 @@
-"""Central configuration for the manuscript experiments."""
+"""Exact experiment settings extracted from the original analysis scripts."""
 
 SEED = 17
-N_SPLITS = 5
-VAL_SIZE = 0.10
+CV_N_SPLITS = 5
+
+# Used only by MLP, FT-Transformer, and Robust FT-Transformer.
+# Within each outer 5-fold training portion, 10% is held out for early stopping.
+INNER_VALIDATION_SIZE = 0.10
+
 N_RANDOM_REPEATS = 100
-RANDOM_MASK_COUNTS = (1, 2)
+RANDOM_MASK_COUNTS = (0, 1, 2)
 MASK_PROBABILITIES = (0.1, 0.2, 0.3)
+MAIN_ROBUST_MASK_PROBABILITY = 0.2
 
 CONTINUOUS_FEATURES = [
     "AGE", "CDRSB", "FAQTOTAL", "MMSCORE", "BMI", "PULSE"
@@ -16,16 +21,19 @@ LABEL_COLUMN = "DIAGNOSIS"
 
 TASKS = {
     "AD_vs_CN": {
-        "classes": ("CN", "AD"),
+        "selected_classes": ["CN", "AD"],
         "label_map": {"CN": 0, "AD": 1},
+        "target_names": ["CN", "AD"],
     },
     "AD_vs_MCI": {
-        "classes": ("MCI", "AD"),
+        "selected_classes": ["MCI", "AD"],
         "label_map": {"MCI": 0, "AD": 1},
+        "target_names": ["MCI", "AD"],
     },
     "MCI_vs_CN": {
-        "classes": ("CN", "MCI"),
+        "selected_classes": ["CN", "MCI"],
         "label_map": {"CN": 0, "MCI": 1},
+        "target_names": ["CN", "MCI"],
     },
 }
 
@@ -73,9 +81,4 @@ FT_CONFIG = {
     "n_layers": 3,
     "patience": 10,
     "weight_decay": 0.001,
-}
-
-ROBUST_FT_CONFIG = {
-    **FT_CONFIG,
-    "feature_mask_prob": 0.2,
 }

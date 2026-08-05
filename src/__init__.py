@@ -1,1 +1,1 @@
-"""Source package for the robust clinical tabular prediction experiments."""
+"""Robust clinical tabular prediction experiment package."""

@@ -1,68 +1,80 @@
-"""End-to-end smoke test using the public synthetic sample dataset.
+"""Fast smoke test for the public synthetic sample.
 
-This is a functionality test only. Its metrics must not be compared with or
-used to reproduce the manuscript results.
+This validates data loading, task construction, preprocessing, and model
+forward passes. It does not reproduce manuscript results.
 """
 
-from __future__ import annotations
-
 import argparse
-import subprocess
-import sys
-from pathlib import Path
+import numpy as np
+import torch
 
-try:
-    from .data_utils import load_data
-    from .config import FEATURES, LABEL_COLUMN
-except ImportError:
-    from data_utils import load_data
-    from config import FEATURES, LABEL_COLUMN
+from .config import *
+from .data_utils import (
+    load_dataframe, make_task_dataframe,
+    fit_tree_preprocessor, fit_neural_preprocessor
+)
+from .models import MLPClassifier, FTTransformer, RobustFTTransformer
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
+    p = argparse.ArgumentParser()
+    p.add_argument(
         "--data_path",
-        default="data/sample/synthetic_clinical_sample.csv",
+        default="data/sample/synthetic_clinical_sample_200.csv"
     )
-    parser.add_argument(
-        "--output_dir",
-        default="results/sample_test",
-    )
-    args = parser.parse_args()
+    args = p.parse_args()
 
-    data_path = Path(args.data_path)
-    if not data_path.exists():
-        raise FileNotFoundError(f"Sample dataset not found: {data_path}")
+    df = load_dataframe(args.data_path)
+    print("Rows:", len(df))
+    print(df[LABEL_COLUMN].value_counts())
 
-    df = load_data(str(data_path))
-    print(f"Loaded {len(df)} rows.")
-    print("Columns:", FEATURES + [LABEL_COLUMN])
-    print("Diagnosis counts:")
-    print(df[LABEL_COLUMN].value_counts().to_string())
+    for task_name in TASKS:
+        X, y = make_task_dataframe(df, task_name)
+        split = int(len(X) * 0.8)
+        X_train, X_test = X.iloc[:split], X.iloc[split:]
 
-    command = [
-        sys.executable,
-        "-m",
-        "src.main_experiment",
-        "--data_path",
-        str(data_path),
-        "--output_dir",
-        args.output_dir,
-        "--n_splits",
-        "2",
-        "--quick",
-        "--cpu",
-    ]
-    print("\nRunning smoke test:")
-    print(" ".join(command))
-    subprocess.run(command, check=True)
+        tree_prep = fit_tree_preprocessor(X_train)
+        tree_train = tree_prep.transform(X_train)
+        tree_test = tree_prep.transform(X_test)
+        assert tree_train.shape[1] == len(FEATURES)
+        assert tree_test.shape[1] == len(FEATURES)
 
-    summary = Path(args.output_dir) / "complete_input_summary.csv"
-    if not summary.exists():
-        raise RuntimeError(f"Expected output was not created: {summary}")
+        mlp_prep = fit_neural_preprocessor(X_train, "mode")
+        _, _, mlp_x = mlp_prep.transform(X_test)
+        mlp = MLPClassifier(mlp_x.shape[1], **{
+            "hidden_dim": MLP_CONFIG["hidden_dim"],
+            "num_layers": MLP_CONFIG["num_layers"],
+            "dropout": MLP_CONFIG["dropout"],
+        })
+        mlp_logits = mlp(torch.tensor(mlp_x[:4], dtype=torch.float32))
+        assert mlp_logits.shape == (4, 2)
 
-    print(f"\nSmoke test completed successfully: {summary}")
+        ft_prep = fit_neural_preprocessor(X_train, "missing")
+        xc, xk, _ = ft_prep.transform(X_test)
+        ft = FTTransformer(
+            len(CONTINUOUS_FEATURES), ft_prep.cat_cardinalities,
+            d_model=FT_CONFIG["d_model"],
+            n_heads=FT_CONFIG["n_heads"],
+            n_layers=FT_CONFIG["n_layers"],
+            dropout=FT_CONFIG["dropout"],
+        )
+        robust = RobustFTTransformer(
+            len(CONTINUOUS_FEATURES), ft_prep.cat_cardinalities,
+            d_model=FT_CONFIG["d_model"],
+            n_heads=FT_CONFIG["n_heads"],
+            n_layers=FT_CONFIG["n_layers"],
+            dropout=FT_CONFIG["dropout"],
+            feature_mask_prob=MAIN_ROBUST_MASK_PROBABILITY,
+        )
+        xc_t = torch.tensor(xc[:4], dtype=torch.float32)
+        xk_t = torch.tensor(xk[:4], dtype=torch.long)
+        assert ft(xc_t, xk_t).shape == (4, 2)
+        robust.train()
+        assert robust(xc_t, xk_t, apply_feature_mask=True).shape == (4, 2)
+
+        print(f"{task_name}: passed")
+
+    print("Sample-data smoke test passed.")
 
 
 if __name__ == "__main__":

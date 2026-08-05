@@ -1,74 +1,15 @@
-"""Data validation, task construction, and fold-wise preprocessing."""
-
 from dataclasses import dataclass
-from typing import Dict, Tuple
-
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import OrdinalEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
 
-try:
-    from .config import (
-        CATEGORICAL_FEATURES,
-        CONTINUOUS_FEATURES,
-        FEATURES,
-        LABEL_COLUMN,
-        TASKS,
-    )
-except ImportError:
-    from config import (
-        CATEGORICAL_FEATURES,
-        CONTINUOUS_FEATURES,
-        FEATURES,
-        LABEL_COLUMN,
-        TASKS,
-    )
+from .config import (
+    CATEGORICAL_FEATURES, CONTINUOUS_FEATURES, FEATURES, LABEL_COLUMN, TASKS
+)
 
 
-@dataclass
-class FoldPreprocessor:
-    scaler: StandardScaler
-    encoder: OrdinalEncoder
-    continuous_fill_values: Dict[str, float]
-    categorical_fill_values: Dict[str, str]
-    cat_cardinalities: list[int]
-
-    def transform(self, frame: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        x = frame.copy()
-
-        for col in CONTINUOUS_FEATURES:
-            x[col] = pd.to_numeric(x[col], errors="coerce")
-            x[col] = x[col].fillna(self.continuous_fill_values[col])
-
-        for col in CATEGORICAL_FEATURES:
-            x[col] = x[col].fillna(self.categorical_fill_values[col]).astype(str)
-
-        x_cont = self.scaler.transform(x[CONTINUOUS_FEATURES]).astype(np.float32)
-        x_cat = self.encoder.transform(x[CATEGORICAL_FEATURES])
-        x_cat = (x_cat + 1).astype(np.int64)
-        x_all = np.concatenate([x_cont, x_cat.astype(np.float32)], axis=1)
-        return x_cont, x_cat, x_all
-
-    def replacement_values(self) -> np.ndarray:
-        continuous_raw = np.array(
-            [[self.continuous_fill_values[c] for c in CONTINUOUS_FEATURES]],
-            dtype=float,
-        )
-        continuous_replacement = self.scaler.transform(
-            pd.DataFrame(continuous_raw, columns=CONTINUOUS_FEATURES)
-        )[0]
-
-        categorical_raw = np.array(
-            [[self.categorical_fill_values[c] for c in CATEGORICAL_FEATURES]],
-            dtype=object,
-        )
-        categorical_replacement = self.encoder.transform(categorical_raw)[0] + 1
-        return np.concatenate(
-            [continuous_replacement, categorical_replacement.astype(float)]
-        )
-
-
-def load_data(path: str) -> pd.DataFrame:
+def load_dataframe(path):
     df = pd.read_csv(path, low_memory=False)
     missing = [c for c in FEATURES + [LABEL_COLUMN] if c not in df.columns]
     if missing:
@@ -76,55 +17,105 @@ def load_data(path: str) -> pd.DataFrame:
     return df
 
 
-def make_task(df: pd.DataFrame, task_name: str) -> tuple[pd.DataFrame, np.ndarray]:
-    if task_name not in TASKS:
-        raise KeyError(f"Unknown task: {task_name}")
-
+def make_task_dataframe(df, task_name):
     task = TASKS[task_name]
     out = df[FEATURES + [LABEL_COLUMN]].copy()
     out = out.dropna(subset=[LABEL_COLUMN])
-    out = out[out[LABEL_COLUMN].isin(task["classes"])].reset_index(drop=True)
-    if out.empty:
-        raise ValueError(f"No rows available for task {task_name}")
-
-    y = out[LABEL_COLUMN].map(task["label_map"]).astype(int).to_numpy()
-    return out[FEATURES].copy(), y
+    out = out[out[LABEL_COLUMN].isin(task["selected_classes"])].copy()
+    out["LABEL"] = out[LABEL_COLUMN].map(task["label_map"])
+    out = out.reset_index(drop=True)
+    return out[FEATURES].copy(), out["LABEL"].astype(int).copy()
 
 
-def fit_preprocessor(train_frame: pd.DataFrame) -> FoldPreprocessor:
+@dataclass
+class NeuralPreprocessor:
+    scaler: StandardScaler
+    encoder: OrdinalEncoder
+    continuous_fill_values: dict
+    categorical_fill_values: dict
+    cat_cardinalities: list
+
+    def transform(self, frame):
+        x = frame.copy()
+        for col in CONTINUOUS_FEATURES:
+            x[col] = x[col].fillna(self.continuous_fill_values[col])
+        for col in CATEGORICAL_FEATURES:
+            x[col] = x[col].fillna(self.categorical_fill_values[col]).astype(str)
+
+        x_cont = self.scaler.transform(x[CONTINUOUS_FEATURES])
+        x_cat = (self.encoder.transform(x[CATEGORICAL_FEATURES]) + 1).astype(int)
+        x_all = np.concatenate([x_cont, x_cat.astype(float)], axis=1)
+        return x_cont, x_cat, x_all
+
+
+def fit_neural_preprocessor(train_frame, categorical_strategy):
     x = train_frame.copy()
 
-    continuous_fill_values: Dict[str, float] = {}
+    continuous_fill_values = {}
     for col in CONTINUOUS_FEATURES:
-        x[col] = pd.to_numeric(x[col], errors="coerce")
-        value = float(x[col].median())
-        if np.isnan(value):
-            value = 0.0
+        value = x[col].median()
         continuous_fill_values[col] = value
         x[col] = x[col].fillna(value)
 
-    categorical_fill_values: Dict[str, str] = {}
+    categorical_fill_values = {}
     for col in CATEGORICAL_FEATURES:
-        series = x[col].dropna().astype(str)
-        value = str(series.mode().iloc[0]) if not series.empty else "Missing"
+        if categorical_strategy == "mode":
+            mode = x[col].mode()
+            value = mode.iloc[0] if len(mode) > 0 else "Missing"
+        elif categorical_strategy == "missing":
+            value = "Missing"
+        else:
+            raise ValueError("categorical_strategy must be 'mode' or 'missing'")
         categorical_fill_values[col] = value
         x[col] = x[col].fillna(value).astype(str)
 
     scaler = StandardScaler()
     scaler.fit(x[CONTINUOUS_FEATURES])
 
-    encoder = OrdinalEncoder(
-        handle_unknown="use_encoded_value",
-        unknown_value=-1,
-    )
+    encoder = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
     encoder.fit(x[CATEGORICAL_FEATURES])
 
     cat_cardinalities = [len(categories) + 1 for categories in encoder.categories_]
 
-    return FoldPreprocessor(
+    return NeuralPreprocessor(
         scaler=scaler,
         encoder=encoder,
         continuous_fill_values=continuous_fill_values,
         categorical_fill_values=categorical_fill_values,
         cat_cardinalities=cat_cardinalities,
     )
+
+
+@dataclass
+class TreePreprocessor:
+    cont_imputer: SimpleImputer
+    cat_imputer: SimpleImputer
+    encoder: OrdinalEncoder
+
+    def transform(self, frame):
+        x_cont = self.cont_imputer.transform(frame[CONTINUOUS_FEATURES])
+        x_cat_raw = self.cat_imputer.transform(frame[CATEGORICAL_FEATURES].astype(str))
+        x_cat = self.encoder.transform(x_cat_raw) + 1
+        return np.concatenate([x_cont, x_cat], axis=1)
+
+    def replacement_values(self):
+        cat_mode_encoded = self.encoder.transform(
+            self.cat_imputer.statistics_.reshape(1, -1)
+        ) + 1
+        return np.concatenate([
+            self.cont_imputer.statistics_.astype(float),
+            cat_mode_encoded.flatten().astype(float),
+        ])
+
+
+def fit_tree_preprocessor(train_frame):
+    cont_imputer = SimpleImputer(strategy="median")
+    cont_imputer.fit(train_frame[CONTINUOUS_FEATURES])
+
+    cat_imputer = SimpleImputer(strategy="most_frequent")
+    cat_raw = cat_imputer.fit_transform(train_frame[CATEGORICAL_FEATURES].astype(str))
+
+    encoder = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
+    encoder.fit(cat_raw)
+
+    return TreePreprocessor(cont_imputer, cat_imputer, encoder)
