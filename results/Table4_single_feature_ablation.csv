@@ -1,35 +1,10 @@
-﻿,,,,,,,
-Task,Masked Feature,AUROC,,,,,
-AD vs. CN,MMSCORE,0.0042,,,,,
-,CDRSB,0.0022,,,,,
-,FAQTOTAL,0.0005,,,,,
-AD vs. MCI,MMSCORE,0.0314,,,,,
-,CDRSB,0.0150,,,,,
-,FAQTOTAL,0.0026,,,,,
-MCI vs. CN,CDRSB,0.1249,,,,,
-,MMSCORE,0.0005,,,,,
-,AGE,0.0000,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
-,,,,,,,
+﻿Task,Masked Feature,ΔAUROC
+AD vs. CN,MMSCORE,0.0042
+,CDRSB,0.0022
+,FAQTOTAL,0.0005
+AD vs. MCI,MMSCORE,0.0314
+,CDRSB,0.015
+,FAQTOTAL,0.0026
+MCI vs. CN,CDRSB,0.1249
+,MMSCORE,0.0005
+,AGE,0
