@@ -4,13 +4,13 @@ Code for evaluating the robustness of Transformer-based clinical tabular predict
 
 ## Overview
 
-This repository contains the experimental code for the study:
+This repository contains the experimental code and aggregate results for the study:
 
 **Robust Clinical Tabular Prediction of Alzheimer's Disease Using Feature-Token Masking Under Missing Feature Conditions**
 
 The study investigates whether random feature-token masking during training improves the robustness of Transformer-based clinical tabular models when one or more clinical variables are unavailable during inference.
 
-The proposed robust FT-Transformer represents each clinical variable as an individual feature token. During training, randomly selected feature tokens are replaced with a learnable mask token. This masking-aware training strategy is intended to reduce excessive dependence on a small number of dominant clinical variables and improve prediction stability under incomplete-input conditions.
+The proposed robust Feature Tokenizer Transformer (FT-Transformer) represents each clinical variable as an individual feature token. During training, randomly selected feature tokens are replaced with a learnable mask token. This masking-aware training strategy is intended to improve prediction stability under incomplete-input conditions.
 
 The experiments include:
 
@@ -40,18 +40,18 @@ The positive class was defined as:
 
 Eight baseline clinical variables were used:
 
-- AGE
-- CDRSB
-- FAQTOTAL
-- MMSCORE
-- BMI
-- PULSE
-- GENDER
-- APOE4
+- `AGE`
+- `CDRSB`
+- `FAQTOTAL`
+- `MMSCORE`
+- `BMI`
+- `PULSE`
+- `GENDER`
+- `APOE4`
 
 The diagnostic label column is:
 
-- DIAGNOSIS
+- `DIAGNOSIS`
 
 Only baseline records were used. Early mild cognitive impairment and late mild cognitive impairment were combined into a single MCI group.
 
@@ -78,16 +78,35 @@ The robust FT-Transformer applies random feature-token masking during training. 
 ├── data/
 │   ├── README_data.md
 │   └── sample/
-│       └── ADNI_clinical_sample_data.csv
-├── code/
-│   ├── models.py
-│   ├── main_experiment.py
-│   ├── random_masking.py
-│   ├── feature_ablation.py
-│   └── interpretability.py
-└── results/
-    └── README_results.md
+│       └── synthetic_clinical_sample.csv
+├── figures/
+│   ├── Fig1_model_architecture.png
+│   ├── Fig2a_shap_AD_vs_CN.png
+│   ├── Fig2b_shap_AD_vs_MCI.png
+│   ├── Fig2c_shap_MCI_vs_CN.png
+│   └── Fig3_attention_heatmaps.png
+├── results/
+│   ├── README_results.md
+│   ├── Table1_subject_counts.csv
+│   ├── Table2_complete_input_results.csv
+│   ├── Table3_random_masking_results.csv
+│   ├── Table4_single_feature_ablation.csv
+│   └── supplementary/
+└── src/
+    ├── __init__.py
+    ├── config.py
+    ├── data_utils.py
+    ├── models.py
+    ├── train_utils.py
+    ├── main_experiment.py
+    ├── random_masking.py
+    ├── masking_probability_analysis.py
+    ├── feature_ablation.py
+    ├── interpretability.py
+    └── test_sample_data.py
 ```
+
+The unused `src/models/` directory should be removed if it is empty, because the model definitions are stored in `src/models.py`.
 
 ## Installation
 
@@ -113,33 +132,43 @@ The clinical data used in this study were obtained from the Alzheimer's Disease 
 
 Due to the ADNI data-use agreement, raw participant-level data are not distributed through this repository. Qualified investigators must request access through the official ADNI data-access procedure.
 
-No real participant-level ADNI data are included in this repository.
+**No real participant-level ADNI data are included in this repository.**
 
 This repository provides:
 
-- model implementation
-- preprocessing procedures
+- model implementations
+- fold-specific preprocessing procedures
 - model training and evaluation code
 - missing-feature robustness analysis
 - masking-probability analysis
 - single-feature ablation analysis
 - model interpretation analysis
+- synthetic sample data for code verification
+- aggregate manuscript-level results
 
 ## Synthetic Sample Data
 
-The `data/sample/` directory contains a synthetic CSV file illustrating the expected input format:
+The repository contains a synthetic CSV file illustrating the expected input format:
 
 ```text
-data/sample/ADNI_clinical_sample_data.csv
+data/sample/synthetic_clinical_sample.csv
 ```
 
-The sample file does not contain real ADNI participant records. All values are artificially generated for format inspection only.
+The file contains 200 artificially generated records and does not contain real ADNI participant data.
 
-The synthetic sample data are not intended for:
+The synthetic data are provided only for:
 
-- model training
-- performance evaluation
-- reproduction of the reported results
+- input-format inspection
+- preprocessing verification
+- model forward-pass testing
+- code execution and workflow testing
+
+The synthetic data must not be used for:
+
+- reproducing the performance reported in the manuscript
+- clinical interpretation
+- clinical decision-making
+- comparison with the reported ADNI results
 
 To reproduce the study results, users must obtain access to the original ADNI data and prepare a baseline clinical dataframe following the same column structure.
 
@@ -167,134 +196,263 @@ MCI
 AD
 ```
 
-An example input structure is shown below:
+Example:
 
 ```csv
 AGE,CDRSB,FAQTOTAL,MMSCORE,BMI,PULSE,GENDER,APOE4,DIAGNOSIS
-72.4,0.0,1.0,29.0,24.8,68,Male,0,CN
-76.1,4.5,12.0,22.0,23.1,74,Female,1,AD
-70.8,1.5,4.0,27.0,25.3,71,Male,1,MCI
+72.4,0.0,1,29,24.8,68,Male,0,CN
+76.1,4.5,12,22,23.1,74,Female,1,AD
+70.8,1.5,4,27,25.3,71,Male,1,MCI
 ```
 
 ## Data Preprocessing
 
-Subjects with missing values in any of the eight selected clinical variables were excluded before model training and evaluation.
-
 All preprocessing procedures were performed separately within each cross-validation fold.
 
-Continuous variables were standardized using statistics estimated only from the training data within each fold. Categorical encoders were also fitted only on the training data and were subsequently applied to the corresponding validation and test sets.
+For Random Forest and XGBoost:
 
-No information from the held-out test set was used to estimate preprocessing parameters.
+- continuous missing values were replaced using the median estimated from the corresponding training fold
+- categorical missing values were replaced using the most frequent category estimated from the training fold
+- categorical variables were ordinal-encoded using an encoder fitted only on the training fold
+
+For the MLP:
+
+- continuous missing values were replaced using the training-fold median
+- categorical missing values were replaced using the training-fold mode
+- continuous variables were standardized using a `StandardScaler` fitted only on the training subset
+- categorical variables were ordinal-encoded using an encoder fitted only on the training subset
+
+For the standard and robust FT-Transformer:
+
+- continuous missing values were replaced using the training-fold median
+- categorical missing values were represented using a dedicated `"Missing"` category
+- continuous variables were standardized using a `StandardScaler` fitted only on the training subset
+- categorical variables were ordinal-encoded using an encoder fitted only on the training subset
+
+No information from the held-out test folds was used to estimate imputation, scaling, or encoding parameters.
+
+## Cross-Validation and Validation Strategy
+
+All models were evaluated using stratified five-fold cross-validation.
+
+For Random Forest and XGBoost:
+
+- four folds were used for training
+- one fold was used as the held-out test set
+- no additional validation subset was created during the final evaluation because the selected hyperparameters were fixed before the reported evaluation
+
+For the MLP, standard FT-Transformer, and robust FT-Transformer:
+
+- one fold was used as the held-out test set
+- the remaining four folds formed the outer training portion
+- 10% of the outer training portion was further separated as an internal validation set
+- the validation set was used for early stopping
+- the held-out test fold was used only for final performance evaluation
+
+The held-out test folds were not used for:
+
+- hyperparameter selection
+- early stopping
+- model selection
+- imputation parameter estimation
+- scaling parameter estimation
+- categorical encoding
+
+## Testing with Synthetic Sample Data
+
+Run the following command from the repository root:
+
+```bash
+python -m src.test_sample_data
+```
+
+The script automatically loads:
+
+```text
+data/sample/synthetic_clinical_sample.csv
+```
+
+This lightweight smoke test verifies:
+
+- CSV loading
+- required-column validation
+- construction of the three classification tasks
+- tree-based preprocessing
+- neural-network preprocessing
+- MLP forward pass
+- FT-Transformer forward pass
+- robust FT-Transformer forward pass
+- training-time feature-token masking
+
+The smoke test does not perform the complete manuscript experiment and does not reproduce the reported results.
+
+## Running the Complete Training Pipeline on Synthetic Data
+
+The complete training pipeline can also be executed using the synthetic sample:
+
+```bash
+python -m src.main_experiment \
+  --data_path data/sample/synthetic_clinical_sample.csv \
+  --output_dir results/sample_demo
+```
+
+This command runs the full five-fold training workflow using the synthetic data. The generated metrics are only for workflow verification and must not be interpreted as manuscript results.
 
 ## Experimental Workflow
 
-### 1. Main Experiment
+### 1. Complete-Input Experiment
+
+Script:
 
 ```text
-code/main_experiment.py
+src/main_experiment.py
 ```
 
-This script trains and evaluates the five comparison models under complete-input conditions.
+Run:
 
-Main steps:
+```bash
+python -m src.main_experiment \
+  --data_path /path/to/prepared_clinical_dataframe.csv \
+  --output_dir results/main_experiment
+```
 
-- load the baseline clinical dataframe
-- construct the three binary classification tasks
-- perform stratified five-fold cross-validation
-- fit preprocessing procedures within each fold
-- train Random Forest
-- train XGBoost
-- train the multilayer perceptron
-- train the standard FT-Transformer
-- train the robust FT-Transformer
-- evaluate performance on the held-out test folds
-- save fold-wise and summary results
-- save trained model checkpoints
+The script:
 
-Expected outputs:
+- loads the prepared clinical dataframe
+- constructs the three binary classification tasks
+- performs stratified five-fold cross-validation
+- applies fold-specific preprocessing
+- trains Random Forest
+- trains XGBoost
+- trains the MLP
+- trains the standard FT-Transformer
+- trains the robust FT-Transformer
+- evaluates complete-input performance on held-out test folds
+- saves fold-wise and summary results
+- saves Transformer checkpoints locally
+
+Locally generated outputs include:
 
 ```text
-results/full_feature_results.csv
-results/full_feature_fold_results.csv
-results/checkpoints/
+results/main_experiment/
+├── complete_input_fold_results.csv
+├── complete_input_summary.csv
+└── checkpoints/
 ```
+
+Checkpoints and participant-level outputs should not be committed to the public repository.
 
 ### 2. Random Missing-Feature Evaluation
 
+Script:
+
 ```text
-code/random_masking.py
+src/random_masking.py
 ```
 
-This script evaluates trained models when one or two clinical variables are randomly unavailable for each test subject.
+Run:
 
-Two missing-feature conditions are evaluated:
+```bash
+python -m src.random_masking \
+  --data_path /path/to/prepared_clinical_dataframe.csv \
+  --checkpoint_dir results/main_experiment/checkpoints \
+  --output_dir results/random_masking
+```
 
+The script evaluates trained FT-Transformer and robust FT-Transformer checkpoints under:
+
+- complete-input evaluation
 - random masking of one feature per subject
 - random masking of two features per subject
 
-Each random masking condition is repeated 100 times to reduce dependence on a single randomly generated masking pattern.
+For each subject, masked features are selected independently from the eight input variables.
 
-For each subject, the masked feature or features are selected independently from the eight input variables.
+The one-feature and two-feature masking conditions are repeated 100 times.
 
-Expected outputs:
+Locally generated outputs include:
 
 ```text
-results/random_one_feature_results.csv
-results/random_two_feature_results.csv
-results/random_masking_summary.csv
+results/random_masking/
+├── random_masking_repeat_results.csv
+└── random_masking_summary.csv
 ```
 
 ### 3. Masking-Probability Analysis
 
-The robust FT-Transformer is evaluated using the following training masking probabilities:
+Script:
 
 ```text
-p = 0.1
-p = 0.2
-p = 0.3
+src/masking_probability_analysis.py
 ```
 
-A masking probability of `p = 0.2` was selected for the main experiments because it provided the most balanced overall performance across the three classification tasks.
+Run:
 
-Expected output:
+```bash
+python -m src.masking_probability_analysis \
+  --data_path /path/to/prepared_clinical_dataframe.csv \
+  --output_dir results/masking_probability
+```
+
+The robust FT-Transformer is trained using:
+
+- `p = 0.1`
+- `p = 0.2`
+- `p = 0.3`
+
+The main experiments used `p = 0.2`.
+
+Locally generated outputs include:
 
 ```text
-results/masking_probability_results.csv
+results/masking_probability/
+├── masking_probability_fold_results.csv
+└── masking_probability_summary.csv
 ```
 
 ### 4. Single-Feature Ablation
 
+Script:
+
 ```text
-code/feature_ablation.py
+src/feature_ablation.py
 ```
 
-This script evaluates the effect of removing one clinical variable at a time.
+Run:
 
-For the robust FT-Transformer, the selected feature is replaced with the learnable mask token during inference.
-
-The reduction in discrimination performance is calculated as:
-
-```text
-Delta AUROC = Full-feature AUROC - Ablated-feature AUROC
+```bash
+python -m src.feature_ablation \
+  --data_path /path/to/prepared_clinical_dataframe.csv \
+  --checkpoint_dir results/main_experiment/checkpoints \
+  --output_dir results/feature_ablation
 ```
 
-A positive value indicates that AUROC decreased after feature ablation. A negative value indicates a slight increase relative to complete-input evaluation.
+For the robust FT-Transformer, each selected feature is replaced with the learned mask token during inference.
 
-Expected output:
+The AUROC degradation is defined as:
 
 ```text
-results/single_feature_ablation_results.csv
+Delta AUROC = Complete-input AUROC - Ablated-input AUROC
+```
+
+A positive value indicates a decrease in AUROC after masking the feature.
+
+Locally generated outputs include:
+
+```text
+results/feature_ablation/
+├── single_feature_ablation_fold_results.csv
+└── single_feature_ablation_summary.csv
 ```
 
 ### 5. Interpretability Analysis
 
+Script:
+
 ```text
-code/interpretability.py
+src/interpretability.py
 ```
 
-This script performs interpretation analyses for the robust FT-Transformer.
-
-The main analyses include:
+The interpretation analysis includes:
 
 - fold-wise SHAP value calculation
 - pooling of out-of-fold SHAP values across five folds
@@ -303,20 +461,13 @@ The main analyses include:
 - averaging of attention weights across attention heads, test subjects, and cross-validation folds
 - task-specific attention heatmap visualization
 
-Expected outputs:
+The public repository should contain only aggregate interpretation results and final figures. Participant-level SHAP values, subject identifiers, and raw attention values should not be committed.
 
-```text
-results/shap_values/
-results/attention_weights/
-results/figures/shap_AD_vs_CN.png
-results/figures/shap_AD_vs_MCI.png
-results/figures/shap_MCI_vs_CN.png
-results/figures/attention_heatmaps.png
-```
+> Important: `src/interpretability.py` should contain the complete executable SHAP and attention implementation before public release. A placeholder-only version should not be published.
 
 ## Evaluation Metrics
 
-Model performance is evaluated using:
+Model performance was evaluated using:
 
 - Accuracy
 - Precision
@@ -324,57 +475,86 @@ Model performance is evaluated using:
 - F1-score
 - AUROC
 
-Precision, sensitivity, and F1-score are macro-averaged across the two classes.
+Precision, sensitivity, and F1-score were macro-averaged across the two classes.
 
-Missing-feature robustness is additionally evaluated using the reduction in AUROC relative to complete-input performance.
+Missing-feature robustness was additionally evaluated using the reduction in AUROC relative to complete-input performance.
 
 ## Experimental Settings
 
-The main experimental settings are:
+The main experimental settings were:
 
 - random seed: `17`
-- cross-validation: stratified five-fold cross-validation
+- outer cross-validation: stratified five-fold cross-validation
+- internal validation ratio for neural models: `10%` of the outer training portion
 - number of input variables: `8`
 - robust FT-Transformer masking probability: `0.2`
 - random masking repetitions: `100`
-- random masking conditions: one or two features per subject
+- random masking conditions: zero, one, or two features per subject
 
-The final model-specific hyperparameters are described in the manuscript and Supplementary Material.
+The final model-specific hyperparameters are defined in `src/config.py` and reported in the Supplementary Material.
+
+## Manuscript-Level Results
+
+The `results/` directory contains aggregate results reported in the manuscript:
+
+```text
+results/
+├── Table1_subject_counts.csv
+├── Table2_complete_input_results.csv
+├── Table3_random_masking_results.csv
+├── Table4_single_feature_ablation.csv
+└── supplementary/
+```
+
+These files contain only summary-level results and do not contain participant identifiers.
+
+## Figures
+
+The `figures/` directory contains the final manuscript figures:
+
+```text
+figures/
+├── Fig1_model_architecture.png
+├── Fig2a_shap_AD_vs_CN.png
+├── Fig2b_shap_AD_vs_MCI.png
+├── Fig2c_shap_MCI_vs_CN.png
+└── Fig3_attention_heatmaps.png
+```
 
 ## Reproducibility
 
 All experiments used fixed random seeds.
 
-The held-out test folds were not used for:
+Preprocessing was fitted independently within each fold. The held-out test data were not used for fitting imputers, scalers, encoders, or early-stopping criteria.
 
-- hyperparameter selection
-- early stopping
-- model selection
-- preprocessing parameter estimation
+For random missing-feature evaluation, the same trained model checkpoint was repeatedly evaluated using different subject-specific masking patterns.
 
-Continuous variables were standardized using training-derived statistics. Categorical encoders were fitted only on the corresponding training subsets.
+Because the original ADNI participant-level data cannot be redistributed, the synthetic dataset supports code and workflow verification only. Exact manuscript results require authorized access to the original ADNI data and the same data-preparation procedure.
 
-The fitted preprocessing objects were then applied to the validation and held-out test sets.
+## Notes on Restricted Data and Outputs
 
-For random missing-feature evaluation, the same trained model checkpoint was evaluated repeatedly using different subject-specific masking patterns.
+The following items are excluded from the public repository:
 
-## Notes on Data and Results
+- raw ADNI data
+- processed participant-level ADNI data
+- participant identifiers
+- participant-level predictions
+- participant-level probabilities
+- participant-level SHAP values
+- raw subject-level attention values
+- model checkpoints trained on restricted ADNI data
 
-Raw ADNI data are excluded from this repository.
-
-Participant-level prediction files, subject identifiers, processed participant-level datasets, and other restricted data-derived files are also excluded from version control.
-
-The following directories are expected to be generated locally after running the code:
+The following directories may be generated locally:
 
 ```text
-results/checkpoints/
-results/fold_results/
-results/shap_values/
-results/attention_weights/
-results/figures/
+results/main_experiment/checkpoints/
+results/random_masking/
+results/masking_probability/
+results/feature_ablation/
+results/interpretability/
 ```
 
-Summary-level result files that do not contain participant identifiers may be included in the repository.
+Only aggregate, non-identifiable result files should be committed.
 
 ## Citation
 
@@ -384,7 +564,7 @@ Citation information will be added after publication.
 
 This repository is released under the MIT License. See the `LICENSE` file for details.
 
-The license applies only to the source code and does not apply to the ADNI dataset.
+The license applies only to the source code and repository documentation. It does not apply to the ADNI dataset or other restricted third-party data.
 
 ## Acknowledgment
 
