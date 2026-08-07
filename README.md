@@ -55,6 +55,8 @@ The diagnostic label column is:
 
 Only baseline records were used. Early mild cognitive impairment and late mild cognitive impairment were combined into a single MCI group.
 
+Samples with missing values in any of the eight selected clinical variables were excluded before model training and evaluation. No missing-value imputation was performed in the reported experiments.
+
 ## Compared Models
 
 Five models were evaluated:
@@ -170,7 +172,7 @@ The synthetic data must not be used for:
 - clinical decision-making
 - comparison with the reported ADNI results
 
-To reproduce the study results, users must obtain access to the original ADNI data and prepare a baseline clinical dataframe following the same column structure.
+To reproduce the study results, users must obtain access to the original ADNI data and prepare a baseline clinical dataframe following the same column structure and complete-case inclusion criteria used in the study.
 
 ## Input Data Format
 
@@ -207,29 +209,33 @@ AGE,CDRSB,FAQTOTAL,MMSCORE,BMI,PULSE,GENDER,APOE4,DIAGNOSIS
 
 ## Data Preprocessing
 
-All preprocessing procedures were performed separately within each cross-validation fold.
+No missing-value imputation was performed in the reported experiments.
+
+Before constructing the classification tasks, samples with missing values in any of the eight selected clinical variables were excluded. The resulting complete-case dataset was then used for model training and evaluation.
+
+After complete-case filtering, preprocessing procedures that required fitted parameters were performed separately within each cross-validation fold.
 
 For Random Forest and XGBoost:
 
-- continuous missing values were replaced using the median estimated from the corresponding training fold
-- categorical missing values were replaced using the most frequent category estimated from the training fold
-- categorical variables were ordinal-encoded using an encoder fitted only on the training fold
+- categorical variables were ordinal-encoded using an encoder fitted only on the corresponding training fold
+- continuous variables were used without standardization
 
 For the MLP:
 
-- continuous missing values were replaced using the training-fold median
-- categorical missing values were replaced using the training-fold mode
 - continuous variables were standardized using a `StandardScaler` fitted only on the training subset
 - categorical variables were ordinal-encoded using an encoder fitted only on the training subset
 
 For the standard and robust FT-Transformer:
 
-- continuous missing values were replaced using the training-fold median
-- categorical missing values were represented using a dedicated `"Missing"` category
 - continuous variables were standardized using a `StandardScaler` fitted only on the training subset
 - categorical variables were ordinal-encoded using an encoder fitted only on the training subset
+- each clinical variable was subsequently represented as an individual feature token
 
-No information from the held-out test folds was used to estimate imputation, scaling, or encoding parameters.
+No information from the held-out test folds was used to estimate scaling or categorical-encoding parameters.
+
+The missing-feature conditions evaluated in this study were introduced experimentally after the complete-case dataset had been prepared. These conditions therefore represent controlled feature unavailability during evaluation rather than naturally occurring missing values in the original input data.
+
+For the robust FT-Transformer, unavailable features were represented by replacing the corresponding feature tokens with a learnable mask token.
 
 ## Cross-Validation and Validation Strategy
 
@@ -254,7 +260,6 @@ The held-out test folds were not used for:
 - hyperparameter selection
 - early stopping
 - model selection
-- imputation parameter estimation
 - scaling parameter estimation
 - categorical encoding
 
@@ -276,6 +281,7 @@ This lightweight smoke test verifies:
 
 - CSV loading
 - required-column validation
+- complete-case filtering
 - construction of the three classification tasks
 - tree-based preprocessing
 - neural-network preprocessing
@@ -319,9 +325,11 @@ python -m src.main_experiment \
 The script:
 
 - loads the prepared clinical dataframe
+- retains the eight selected clinical variables and diagnostic label
+- excludes samples containing missing values in the selected input variables
 - constructs the three binary classification tasks
 - performs stratified five-fold cross-validation
-- applies fold-specific preprocessing
+- applies fold-specific scaling and categorical encoding where required
 - trains Random Forest
 - trains XGBoost
 - trains the MLP
@@ -368,6 +376,8 @@ The script evaluates trained FT-Transformer and robust FT-Transformer checkpoint
 For each subject, masked features are selected independently from the eight input variables.
 
 The one-feature and two-feature masking conditions are repeated 100 times.
+
+The masking applied in this evaluation is experimentally induced and is distinct from naturally occurring missing data. The original analysis dataset consists of complete cases for the eight selected clinical variables.
 
 Locally generated outputs include:
 
@@ -487,6 +497,7 @@ The main experimental settings were:
 - outer cross-validation: stratified five-fold cross-validation
 - internal validation ratio for neural models: `10%` of the outer training portion
 - number of input variables: `8`
+- missing-value handling: complete-case exclusion; no imputation
 - robust FT-Transformer masking probability: `0.2`
 - random masking repetitions: `100`
 - random masking conditions: zero, one, or two features per subject
@@ -525,11 +536,15 @@ figures/
 
 All experiments used fixed random seeds.
 
-Preprocessing was fitted independently within each fold. The held-out test data were not used for fitting imputers, scalers, encoders, or early-stopping criteria.
+Samples with missing values in any of the eight selected clinical variables were excluded before model training and evaluation. No missing-value imputation was applied.
+
+After complete-case filtering, preprocessing parameters such as feature scaling and categorical encoding were fitted independently using the corresponding training data. Held-out test data were not used for fitting scalers, categorical encoders, model parameters, or early-stopping criteria.
 
 For random missing-feature evaluation, the same trained model checkpoint was repeatedly evaluated using different subject-specific masking patterns.
 
-Because the original ADNI participant-level data cannot be redistributed, the synthetic dataset supports code and workflow verification only. Exact manuscript results require authorized access to the original ADNI data and the same data-preparation procedure.
+The random feature masking used in the robustness experiments represents simulated feature unavailability at inference time and should not be interpreted as imputation of naturally missing clinical values.
+
+Because the original ADNI participant-level data cannot be redistributed, the synthetic dataset supports code and workflow verification only. Exact manuscript results require authorized access to the original ADNI data and the same data-preparation and complete-case selection procedures.
 
 ## Notes on Restricted Data and Outputs
 
